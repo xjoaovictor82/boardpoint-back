@@ -1,29 +1,24 @@
 <?php
 /**
- * BOARD POINT — API de pedidos (carrinho / checkout)
+ * CRUD ADMINISTRATIVO de pedidos. TODOS os métodos exigem token de admin.
+ * (A criação do pedido é o checkout público: publico/checkout.php.)
  *
- * POST   ?acao=criar    (público)     — cria um pedido a partir do carrinho, retorna o PIX
- * GET    (autenticado)                — lista pedidos (admin)
- * PUT    ?id=X&acao=status (autenticado) — muda status (pago / cancelado), abate estoque se pago
- *
- * Todo preço/estoque é revalidado contra o banco no POST (nunca confia no
- * valor que o navegador mandou) e as escritas em pedidos + pedido_itens +
- * ajuste de estoque acontecem dentro de uma transação (beginTransaction/
- * commit/rollBack), então nunca ficam pela metade.
+ *   GET    ?pagina=1&por_pagina=10[&status=pago]  lista paginada (com itens)
+ *   GET    ?id=X                                  um pedido (404 se não existir)
+ *   PUT    ?id=X {status?, cliente_nome?, cliente_telefone?, cliente_email?}
+ *                                                 edita (404 se não existir). Ao virar "pago"
+ *                                                 abate o estoque; ao sair de "pago" devolve.
+ *   DELETE ?id=X                                  exclui (404 se não existir). Se estava pago,
+ *                                                 devolve o estoque.
  */
-
 require_once __DIR__ . '/config.php';
-require_once __DIR__ . '/config_loja.php';
-require_once __DIR__ . '/GeradorPix.php';
+require_once __DIR__ . '/validacoes.php';
+
+exigirLogin('admin');
 
 $metodo = $_SERVER['REQUEST_METHOD'];
 $pdo = getConexao();
-
-// Sem chave PIX configurada o checkout não pode gerar cobrança. Recusa antes
-// de gravar o pedido, para não deixar pedido órfão no banco.
-if ($metodo === 'POST' && PIX_CHAVE === '') {
-    respostaErro('PIX indisponível: a chave PIX da loja ainda não foi configurada.', 503);
-}
+$statusValidos = ['aguardando_pagamento', 'pago', 'cancelado'];
 
 function normalizarPedido(array $p): array
 {
@@ -39,200 +34,188 @@ function normalizarPedido(array $p): array
     ];
 }
 
-function gerarCodigoPedido(): string
+function itensDoPedido(PDO $pdo, int $pedidoId): array
 {
-    return 'BP-' . strtoupper(substr(bin2hex(random_bytes(4)), 0, 6));
+    $stmt = $pdo->prepare('SELECT produto_id, produto_nome, preco_unitario, quantidade FROM pedido_itens WHERE pedido_id = ?');
+    $stmt->execute([$pedidoId]);
+    return array_map(function ($it) {
+        return [
+            'produto_id'     => (int) $it['produto_id'],
+            'produto_nome'   => $it['produto_nome'],
+            'preco_unitario' => (float) $it['preco_unitario'],
+            'quantidade'     => (int) $it['quantidade'],
+        ];
+    }, $stmt->fetchAll());
+}
+
+// Abate (true) ou devolve (false) o estoque de todos os itens do pedido.
+function ajustarEstoque(PDO $pdo, int $pedidoId, bool $abater): void
+{
+    $stmtItens = $pdo->prepare('SELECT produto_id, quantidade FROM pedido_itens WHERE pedido_id = ?');
+    $stmtItens->execute([$pedidoId]);
+    $itens = $stmtItens->fetchAll();
+
+    $sql = $abater
+        ? 'UPDATE produtos SET estoque = GREATEST(0, estoque - ?) WHERE id = ?'
+        : 'UPDATE produtos SET estoque = estoque + ? WHERE id = ?';
+    $stmt = $pdo->prepare($sql);
+    foreach ($itens as $it) {
+        $stmt->execute([$it['quantidade'], $it['produto_id']]);
+    }
 }
 
 switch ($metodo) {
 
-    // -------------------------------------------------------------------
-    case 'POST':
-        $acao = $_GET['acao'] ?? '';
-        if ($acao !== 'criar') {
-            respostaErro('Ação inválida.', 404);
-        }
-
-        $dados = corpoJson();
-        $nome = trim($dados['nome'] ?? '');
-        $telefone = trim($dados['telefone'] ?? '');
-        $email = trim($dados['email'] ?? '');
-        $itens = $dados['itens'] ?? [];
-
-        if ($nome === '' || $telefone === '') {
-            respostaErro('Informe nome e telefone para contato.', 422);
-        }
-        if (!is_array($itens) || count($itens) === 0) {
-            respostaErro('Carrinho vazio.', 422);
-        }
-
-        // Revalida cada item contra o banco: preço e estoque reais,
-        // nunca confia no que o navegador mandou.
-        $itensValidados = [];
-        $total = 0.0;
-
-        foreach ($itens as $item) {
-            $produtoId = (int) ($item['produto_id'] ?? 0);
-            $quantidade = (int) ($item['quantidade'] ?? 0);
-
-            if ($produtoId <= 0 || $quantidade <= 0) {
-                respostaErro('Item de carrinho inválido.', 422);
-            }
-
-            $stmt = $pdo->prepare('SELECT id, nome, preco, estoque, ativo FROM produtos WHERE id = ?');
-            $stmt->execute([$produtoId]);
-            $produto = $stmt->fetch();
-
-            if (!$produto || !$produto['ativo']) {
-                respostaErro('Um dos produtos não está mais disponível.', 422);
-            }
-            if ($produto['preco'] === null) {
-                respostaErro('Produto "' . $produto['nome'] . '" está sob consulta e não pode ser comprado online.', 422);
-            }
-            if ($quantidade > (int) $produto['estoque']) {
-                respostaErro('Estoque insuficiente para "' . $produto['nome'] . '".', 422);
-            }
-
-            $subtotal = (float) $produto['preco'] * $quantidade;
-            $total += $subtotal;
-
-            $itensValidados[] = [
-                'produto_id'     => $produto['id'],
-                'produto_nome'   => $produto['nome'],
-                'preco_unitario' => (float) $produto['preco'],
-                'quantidade'     => $quantidade,
-            ];
-        }
-
-        $codigo = gerarCodigoPedido();
-
-        $pdo->beginTransaction();
-        try {
-            $stmt = $pdo->prepare(
-                'INSERT INTO pedidos (codigo, cliente_nome, cliente_telefone, cliente_email, total, status)
-                 VALUES (?, ?, ?, ?, ?, "aguardando_pagamento")'
-            );
-            $stmt->execute([$codigo, $nome, $telefone, $email ?: null, $total]);
-            $pedidoId = (int) $pdo->lastInsertId();
-
-            $stmtItem = $pdo->prepare(
-                'INSERT INTO pedido_itens (pedido_id, produto_id, produto_nome, preco_unitario, quantidade)
-                 VALUES (?, ?, ?, ?, ?)'
-            );
-            foreach ($itensValidados as $it) {
-                $stmtItem->execute([
-                    $pedidoId, $it['produto_id'], $it['produto_nome'], $it['preco_unitario'], $it['quantidade'],
-                ]);
-            }
-
-            $pdo->commit();
-        } catch (Exception $e) {
-            $pdo->rollBack();
-            respostaErro('Não foi possível registrar o pedido. Tente novamente.', 500);
-        }
-
-        $gerador = new GeradorPix(PIX_CHAVE, PIX_NOME_RECEBEDOR, PIX_CIDADE);
-        $payloadPix = $gerador->gerarPayload($total, str_replace('-', '', $codigo));
-
-        respostaSucesso([
-            'pedido_id'    => $pedidoId,
-            'codigo'       => $codigo,
-            'total'        => $total,
-            'pix_payload'  => $payloadPix,
-        ], 'Pedido criado com sucesso.');
-        break;
-
-    // -------------------------------------------------------------------
     case 'GET':
-        exigirLogin();
+        if (isset($_GET['id'])) {
+            $id = (int) $_GET['id'];
+            if ($id <= 0) {
+                respostaErro('ID inválido.', 422);
+            }
+            $stmt = $pdo->prepare('SELECT * FROM pedidos WHERE id = ?');
+            $stmt->execute([$id]);
+            $linha = $stmt->fetch();
+            if (!$linha) {
+                respostaErro('Pedido não encontrado.', 404);
+            }
+            $pedido = normalizarPedido($linha);
+            $pedido['itens'] = itensDoPedido($pdo, $id);
+            respostaSucesso($pedido);
+        }
 
-        $stmt = $pdo->query('SELECT * FROM pedidos ORDER BY criado_em DESC');
-        $pedidos = $stmt->fetchAll();
+        [$pagina, $porPagina, $offset] = paginacao();
 
-        $stmtItens = $pdo->prepare('SELECT * FROM pedido_itens WHERE pedido_id = ?');
+        $where = '';
+        $params = [];
+        if (isset($_GET['status']) && $_GET['status'] !== '') {
+            $status = (string) $_GET['status'];
+            if (!in_array($status, $statusValidos, true)) {
+                respostaErro('Status inválido.', 422);
+            }
+            $where = 'WHERE status = ?';
+            $params[] = $status;
+        }
+
+        $stmtTotal = $pdo->prepare("SELECT COUNT(*) FROM pedidos $where");
+        $stmtTotal->execute($params);
+        $total = (int) $stmtTotal->fetchColumn();
+
+        $stmt = $pdo->prepare("SELECT * FROM pedidos $where ORDER BY criado_em DESC, id DESC LIMIT ? OFFSET ?");
+        foreach ($params as $i => $valor) {
+            $stmt->bindValue($i + 1, $valor);
+        }
+        $stmt->bindValue(count($params) + 1, $porPagina, PDO::PARAM_INT);
+        $stmt->bindValue(count($params) + 2, $offset, PDO::PARAM_INT);
+        $stmt->execute();
 
         $resultado = [];
-        foreach ($pedidos as $p) {
-            $stmtItens->execute([$p['id']]);
-            $itens = $stmtItens->fetchAll();
-
-            $pedidoNormalizado = normalizarPedido($p);
-            $pedidoNormalizado['itens'] = array_map(function ($it) {
-                return [
-                    'produto_nome'   => $it['produto_nome'],
-                    'preco_unitario' => (float) $it['preco_unitario'],
-                    'quantidade'     => (int) $it['quantidade'],
-                ];
-            }, $itens);
-
-            $resultado[] = $pedidoNormalizado;
+        foreach ($stmt->fetchAll() as $linha) {
+            $pedido = normalizarPedido($linha);
+            $pedido['itens'] = itensDoPedido($pdo, (int) $linha['id']);
+            $resultado[] = $pedido;
         }
 
-        respostaSucesso($resultado);
+        respostaPaginada($resultado, $total, $pagina, $porPagina);
         break;
 
-    // -------------------------------------------------------------------
     case 'PUT':
-        exigirLogin();
-
         $id = (int) ($_GET['id'] ?? 0);
         if ($id <= 0) {
             respostaErro('ID inválido.', 422);
         }
 
-        $dados = corpoJson();
-        $novoStatus = $dados['status'] ?? '';
+        $stmt = $pdo->prepare('SELECT id, status, cliente_nome, cliente_telefone, cliente_email FROM pedidos WHERE id = ?');
+        $stmt->execute([$id]);
+        $pedido = $stmt->fetch();
+        if (!$pedido) {
+            respostaErro('Pedido não encontrado.', 404);
+        }
 
-        if (!in_array($novoStatus, ['pago', 'cancelado', 'aguardando_pagamento'], true)) {
+        $dados = corpoJson();
+        $mudaStatus = array_key_exists('status', $dados);
+        $mudaCliente = array_key_exists('cliente_nome', $dados)
+            || array_key_exists('cliente_telefone', $dados)
+            || array_key_exists('cliente_email', $dados);
+        if (!$mudaStatus && !$mudaCliente) {
+            respostaErro('Informe o que deseja alterar: status ou dados do cliente.', 422);
+        }
+
+        $novoStatus = $mudaStatus ? (string) $dados['status'] : $pedido['status'];
+        if (!in_array($novoStatus, $statusValidos, true)) {
             respostaErro('Status inválido.', 422);
+        }
+
+        $nome = array_key_exists('cliente_nome', $dados) ? trim((string) $dados['cliente_nome']) : $pedido['cliente_nome'];
+        $telefone = array_key_exists('cliente_telefone', $dados) ? trim((string) $dados['cliente_telefone']) : $pedido['cliente_telefone'];
+        $email = array_key_exists('cliente_email', $dados) ? trim((string) $dados['cliente_email']) : (string) ($pedido['cliente_email'] ?? '');
+
+        if ($nome === '' || $telefone === '') {
+            respostaErro('Nome e telefone do cliente são obrigatórios.', 422);
+        }
+        if (mb_strlen($nome) > 150 || mb_strlen($telefone) > 30) {
+            respostaErro('Nome ou telefone muito longos.', 422);
+        }
+        if ($email !== '' && !validarEmail($email)) {
+            respostaErro('E-mail inválido.', 422);
+        }
+
+        // Só mexe no estoque quando o status realmente muda (evita abater/devolver 2 vezes).
+        $abater = ($novoStatus === 'pago' && $pedido['status'] !== 'pago');
+        $devolver = ($novoStatus !== 'pago' && $pedido['status'] === 'pago');
+
+        $pdo->beginTransaction();
+        try {
+            $stmt = $pdo->prepare(
+                'UPDATE pedidos SET status = ?, cliente_nome = ?, cliente_telefone = ?, cliente_email = ? WHERE id = ?'
+            );
+            $stmt->execute([$novoStatus, $nome, $telefone, $email !== '' ? $email : null, $id]);
+
+            if ($abater || $devolver) {
+                ajustarEstoque($pdo, $id, $abater);
+            }
+            $pdo->commit();
+        } catch (Exception $e) {
+            $pdo->rollBack();
+            error_log('pedidos.php PUT: ' . $e->getMessage());
+            respostaErro('Não foi possível atualizar o pedido.', 500);
+        }
+
+        respostaSucesso(['id' => $id, 'status' => $novoStatus], 'Pedido atualizado.');
+        break;
+
+    case 'DELETE':
+        $id = (int) ($_GET['id'] ?? 0);
+        if ($id <= 0) {
+            respostaErro('ID inválido.', 422);
         }
 
         $stmt = $pdo->prepare('SELECT status FROM pedidos WHERE id = ?');
         $stmt->execute([$id]);
         $pedido = $stmt->fetch();
-
         if (!$pedido) {
             respostaErro('Pedido não encontrado.', 404);
         }
 
-        // Abate estoque ao confirmar pagamento (transição para "pago" vinda
-        // de um status diferente) e devolve estoque se um pedido que já
-        // estava pago for cancelado ou voltar para aguardando — evita
-        // abater/devolver duas vezes se clicarem 2x no mesmo botão.
-        $vaiAbaterEstoque = ($novoStatus === 'pago' && $pedido['status'] !== 'pago');
-        $vaiDevolverEstoque = ($novoStatus !== 'pago' && $pedido['status'] === 'pago');
-
         $pdo->beginTransaction();
         try {
-            $stmt = $pdo->prepare('UPDATE pedidos SET status = ? WHERE id = ?');
-            $stmt->execute([$novoStatus, $id]);
-
-            if ($vaiAbaterEstoque || $vaiDevolverEstoque) {
-                $stmtItens = $pdo->prepare('SELECT produto_id, quantidade FROM pedido_itens WHERE pedido_id = ?');
-                $stmtItens->execute([$id]);
-                $itens = $stmtItens->fetchAll();
-
-                if ($vaiAbaterEstoque) {
-                    $stmtEstoque = $pdo->prepare(
-                        'UPDATE produtos SET estoque = GREATEST(0, estoque - ?) WHERE id = ?'
-                    );
-                } else {
-                    $stmtEstoque = $pdo->prepare(
-                        'UPDATE produtos SET estoque = estoque + ? WHERE id = ?'
-                    );
-                }
-                foreach ($itens as $it) {
-                    $stmtEstoque->execute([$it['quantidade'], $it['produto_id']]);
-                }
+            if ($pedido['status'] === 'pago') {
+                ajustarEstoque($pdo, $id, false); // devolve o estoque que o pagamento tinha abatido
             }
-
+            // Os itens saem junto (FK com ON DELETE CASCADE).
+            $stmt = $pdo->prepare('DELETE FROM pedidos WHERE id = ?');
+            $stmt->execute([$id]);
             $pdo->commit();
         } catch (Exception $e) {
             $pdo->rollBack();
-            respostaErro('Não foi possível atualizar o pedido.', 500);
+            error_log('pedidos.php DELETE: ' . $e->getMessage());
+            respostaErro('Não foi possível excluir o pedido.', 500);
         }
 
-        respostaSucesso(null, 'Status atualizado.');
+        respostaSucesso(null, 'Pedido excluído com sucesso.');
+        break;
+
+    case 'POST':
+        respostaErro('Pedidos são criados pelo checkout público (publico/checkout.php).', 405);
         break;
 
     default:
