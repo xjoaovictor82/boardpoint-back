@@ -11,6 +11,7 @@ export const config = {
 
   db: {
     host: valor("DB_HOST", "127.0.0.1"),
+    porta: Number(valor("DB_PORT", "3306")),
     nome: valor("DB_NAME", "boardpoint"),
     usuario: valor("DB_USER", "root"),
     senha: valor("DB_PASS", ""),

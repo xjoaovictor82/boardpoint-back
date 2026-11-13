@@ -3,6 +3,7 @@ import type { RowDataPacket } from "mysql2/promise";
 import { config } from "./config.js";
 import { consultar } from "./db.js";
 import { ErroHttp } from "./respostas.js";
+import { rotasAuth } from "./rotas/auth.js";
 
 const app = Fastify({ logger: true });
 
@@ -59,5 +60,8 @@ app.get("/api/saude/db", async () => {
     dados: { produtos: Number(linhas[0]?.["total"] ?? 0) },
   };
 });
+
+// --- Rotas da API ---
+await app.register(rotasAuth, { prefix: "/api/auth" });
 
 await app.listen({ port: config.porta, host: "0.0.0.0" });
