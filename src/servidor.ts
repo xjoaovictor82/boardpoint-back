@@ -6,6 +6,7 @@ import { ErroHttp } from "./respostas.js";
 import { rotasAuth } from "./rotas/auth.js";
 import { rotasCategorias } from "./rotas/categorias.js";
 import { rotasCategoriasPublicas } from "./rotas/publico/categorias.js";
+import { rotasProdutosPublicos } from "./rotas/publico/produtos.js";
 
 const app = Fastify({ logger: true });
 
@@ -67,5 +68,6 @@ app.get("/api/saude/db", async () => {
 await app.register(rotasAuth, { prefix: "/api/auth" });
 await app.register(rotasCategorias, { prefix: "/api/categorias" });
 await app.register(rotasCategoriasPublicas, { prefix: "/api/publico/categorias" });
+await app.register(rotasProdutosPublicos, { prefix: "/api/publico/produtos" });
 
 await app.listen({ port: config.porta, host: "0.0.0.0" });

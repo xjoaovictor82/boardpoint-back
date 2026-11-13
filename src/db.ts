@@ -42,3 +42,11 @@ export function erroDoBanco(err: unknown, codigo: string): boolean {
     (err as { code: unknown }).code === codigo
   );
 }
+/** CALL de procedure que devolve linhas: devolve só a lista de linhas do resultado. */
+export async function chamarProcedimento<T extends RowDataPacket>(
+  sql: string,
+  parametros: unknown[] = [],
+): Promise<T[]> {
+  const [resultado] = await pool.query<RowDataPacket[][]>(sql, parametros);
+  return (resultado[0] ?? []) as T[];
+}
