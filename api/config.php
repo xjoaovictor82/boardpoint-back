@@ -1,4 +1,3 @@
-
 <?php
 /**
  * BOARD POINT — Configuração central da API
@@ -9,7 +8,7 @@
  *   2. config_local.php      (XAMPP: copie config_local.example.php; fica fora do Git)
  *   3. valor padrão do XAMPP (root sem senha, via 127.0.0.1)
  */
- 
+
 // Lê uma configuração. O padrão só vale se não houver env nem config_local.php.
 // (getenv() devolve false quando a variável não existe; string vazia é valor válido,
 // por exemplo a senha vazia do XAMPP.)
@@ -25,20 +24,20 @@ function configValor(string $nome, string $padrao = ''): string
     if (array_key_exists($nome, $local)) return (string) $local[$nome];
     return $padrao;
 }
- 
+
 // --- Configuração do banco ---------------------------------------------------
 define('DB_HOST', configValor('DB_HOST', '127.0.0.1'));
 define('DB_NAME', configValor('DB_NAME', 'boardpoint'));
 define('DB_USER', configValor('DB_USER', 'root'));
 define('DB_PASS', configValor('DB_PASS', ''));
 define('DB_CHARSET', 'utf8mb4');
- 
+
 // --- JWT -----------------------------------------------------------------------
 require_once __DIR__ . '/jwt.php';
- 
+
 define('JWT_SECRET', configValor('JWT_SECRET', ''));
 define('JWT_TTL', 60 * 60 * 8); // o token vale 8 horas
- 
+
 // --- Conexão PDO ---------------------------------------------------------------
 function getConexao(): PDO
 {
@@ -58,7 +57,7 @@ function getConexao(): PDO
     }
     return $pdo;
 }
- 
+
 // --- Helpers de resposta JSON ---------------------------------------------------
 function respostaJson($dados, int $status = 200): void
 {
@@ -67,12 +66,12 @@ function respostaJson($dados, int $status = 200): void
     echo json_encode($dados, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
- 
+
 function respostaErro(string $mensagem, int $status = 400): void
 {
     respostaJson(['sucesso' => false, 'erro' => $mensagem], $status);
 }
- 
+
 function respostaSucesso($dados = null, string $mensagem = ''): void
 {
     $payload = ['sucesso' => true];
@@ -80,7 +79,7 @@ function respostaSucesso($dados = null, string $mensagem = ''): void
     if ($dados !== null) $payload['dados'] = $dados;
     respostaJson($payload, 200);
 }
- 
+
 // --- Autenticação por JWT --------------------------------------------------------
 function emitirToken(int $id, string $tipo, array $extra = []): string
 {
@@ -93,19 +92,28 @@ function emitirToken(int $id, string $tipo, array $extra = []): string
         JWT_SECRET
     );
 }
- 
+
 function tokenDaRequisicao(): ?string
 {
-    $cabecalho = $_SERVER['HTTP_AUTHORIZATION']
-        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
-        ?? (function_exists('apache_request_headers') ? (apache_request_headers()['Authorization'] ?? '') : '');
- 
+    $cabecalho = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+
+    // Os navegadores mandam o nome do cabeçalho em minúsculas ("authorization"),
+    // então a busca precisa ignorar maiúsculas e minúsculas.
+    if ($cabecalho === '' && function_exists('getallheaders')) {
+        foreach (getallheaders() as $nome => $valor) {
+            if (strtolower((string) $nome) === 'authorization') {
+                $cabecalho = (string) $valor;
+                break;
+            }
+        }
+    }
+
     if (preg_match('/^Bearer\s+(\S+)$/i', (string) $cabecalho, $m)) {
         return $m[1];
     }
     return null;
 }
- 
+
 /**
  * Exige um token válido do tipo pedido ('admin' ou 'cliente') e devolve o payload.
  * 401 = sem token / token inválido ou expirado. 403 = token válido, mas do tipo errado.
@@ -114,7 +122,7 @@ function exigirLogin(string $tipo = 'admin'): array
 {
     $token = tokenDaRequisicao();
     $payload = $token ? validarJWT($token, JWT_SECRET) : null;
- 
+
     if (JWT_SECRET === '' || $payload === null || empty($payload['sub'])) {
         respostaErro('Não autenticado. Faça login novamente.', 401);
     }
@@ -123,7 +131,37 @@ function exigirLogin(string $tipo = 'admin'): array
     }
     return $payload;
 }
- 
+
+// --- Paginação (listagens do painel) --------------------------------------------
+// Lê ?pagina= e ?por_pagina= e devolve [pagina, porPagina, offset].
+function paginacao(int $padrao = 10): array
+{
+    $pagina = max(1, (int) ($_GET['pagina'] ?? 1));
+    $porPagina = min(100, max(1, (int) ($_GET['por_pagina'] ?? $padrao)));
+    return [$pagina, $porPagina, ($pagina - 1) * $porPagina];
+}
+
+function respostaPaginada(array $itens, int $total, int $pagina, int $porPagina): void
+{
+    respostaSucesso([
+        'itens'         => $itens,
+        'total'         => $total,
+        'pagina'        => $pagina,
+        'por_pagina'    => $porPagina,
+        'total_paginas' => max(1, (int) ceil($total / $porPagina)),
+    ]);
+}
+
+// Confere se existe uma linha com esse id. A tabela vem SEMPRE do nosso código (lista fixa).
+function registroExiste(PDO $pdo, string $tabela, int $id): bool
+{
+    if (!in_array($tabela, ['categorias', 'produtos', 'pedidos', 'contatos'], true)) {
+        throw new InvalidArgumentException('Tabela não permitida.');
+    }
+    $stmt = $pdo->prepare("SELECT 1 FROM $tabela WHERE id = ?");
+    $stmt->execute([$id]);
+    return (bool) $stmt->fetchColumn();
+}
 // --- Normalização de tipos (MySQL via PDO retorna tudo como string) -------------
 function normalizarProduto(array $p): array
 {
@@ -139,7 +177,7 @@ function normalizarProduto(array $p): array
         'categoria_nome' => $p['categoria_nome'],
     ];
 }
- 
+
 function normalizarCategoria(array $c): array
 {
     return [
@@ -148,7 +186,7 @@ function normalizarCategoria(array $c): array
         'nome' => $c['nome'],
     ];
 }
- 
+
 // --- Entrada JSON do corpo da requisição -----------------------------------------
 function corpoJson(): array
 {
@@ -156,4 +194,3 @@ function corpoJson(): array
     $dados = json_decode($raw, true);
     return is_array($dados) ? $dados : [];
 }
- 
