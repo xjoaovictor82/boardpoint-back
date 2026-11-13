@@ -11,6 +11,7 @@ import multipart from "@fastify/multipart";
 import { rotasProdutos } from "./rotas/produtos.js";
 import { rotasContatoPublico } from "./rotas/publico/contato.js";
 import { rotasContatos } from "./rotas/contatos.js";
+import { rotasDashboard } from "./rotas/dashboard.js";
 
 const app = Fastify({ logger: true });
 
@@ -79,5 +80,6 @@ await app.register(rotasProdutosPublicos, { prefix: "/api/publico/produtos" });
 await app.register(rotasProdutos, { prefix: "/api/produtos" });
 await app.register(rotasContatoPublico, { prefix: "/api/publico/contato" });
 await app.register(rotasContatos, { prefix: "/api/contatos" });
+await app.register(rotasDashboard, { prefix: "/api/dashboard" });
 
 await app.listen({ port: config.porta, host: "0.0.0.0" });
