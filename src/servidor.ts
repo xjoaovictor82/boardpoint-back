@@ -7,6 +7,8 @@ import { rotasAuth } from "./rotas/auth.js";
 import { rotasCategorias } from "./rotas/categorias.js";
 import { rotasCategoriasPublicas } from "./rotas/publico/categorias.js";
 import { rotasProdutosPublicos } from "./rotas/publico/produtos.js";
+import multipart from "@fastify/multipart";
+import { rotasProdutos } from "./rotas/produtos.js";
 
 const app = Fastify({ logger: true });
 
@@ -64,10 +66,14 @@ app.get("/api/saude/db", async () => {
   };
 });
 
+// Permite receber arquivos (upload de foto): 1 arquivo de até 5 MB por requisição.
+await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+
 // --- Rotas da API ---
 await app.register(rotasAuth, { prefix: "/api/auth" });
 await app.register(rotasCategorias, { prefix: "/api/categorias" });
 await app.register(rotasCategoriasPublicas, { prefix: "/api/publico/categorias" });
 await app.register(rotasProdutosPublicos, { prefix: "/api/publico/produtos" });
+await app.register(rotasProdutos, { prefix: "/api/produtos" });
 
 await app.listen({ port: config.porta, host: "0.0.0.0" });
