@@ -4,6 +4,7 @@ import { config } from "./config.js";
 import { consultar } from "./db.js";
 import { ErroHttp } from "./respostas.js";
 import { rotasAuth } from "./rotas/auth.js";
+import { rotasCategorias } from "./rotas/categorias.js";
 
 const app = Fastify({ logger: true });
 
@@ -63,5 +64,6 @@ app.get("/api/saude/db", async () => {
 
 // --- Rotas da API ---
 await app.register(rotasAuth, { prefix: "/api/auth" });
+await app.register(rotasCategorias, { prefix: "/api/categorias" });
 
 await app.listen({ port: config.porta, host: "0.0.0.0" });

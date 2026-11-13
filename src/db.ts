@@ -31,3 +31,14 @@ export async function executar(
   const [resultado] = await pool.query<ResultSetHeader>(sql, parametros);
   return resultado;
 }
+
+
+/** true se o erro do MariaDB tem o código informado (ex.: "ER_DUP_ENTRY"). */
+export function erroDoBanco(err: unknown, codigo: string): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === codigo
+  );
+}

@@ -34,3 +34,9 @@ export function validarSenha(senha: string): boolean {
   if (!/[\W_]/.test(senha)) return false;
   return true;
 }
+
+/** Converte o :id da URL em número inteiro. Se não for um número válido (maior que 0), devolve 0. */
+export function lerId(valor: unknown): number {
+  const numero = Math.trunc(Number(valor));
+  return Number.isFinite(numero) && numero > 0 ? numero : 0;
+}
