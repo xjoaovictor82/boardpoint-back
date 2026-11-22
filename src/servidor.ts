@@ -1,0 +1,85 @@
+import Fastify from "fastify";
+import type { RowDataPacket } from "mysql2/promise";
+import { config } from "./config.js";
+import { consultar } from "./db.js";
+import { ErroHttp } from "./respostas.js";
+import { rotasAuth } from "./rotas/auth.js";
+import { rotasCategorias } from "./rotas/categorias.js";
+import { rotasCategoriasPublicas } from "./rotas/publico/categorias.js";
+import { rotasProdutosPublicos } from "./rotas/publico/produtos.js";
+import multipart from "@fastify/multipart";
+import { rotasProdutos } from "./rotas/produtos.js";
+import { rotasContatoPublico } from "./rotas/publico/contato.js";
+import { rotasContatos } from "./rotas/contatos.js";
+import { rotasDashboard } from "./rotas/dashboard.js";
+
+const app = Fastify({ logger: true });
+
+/** Lê o statusCode de um erro desconhecido. Devolve 0 se não houver. */
+function statusDoErro(err: unknown): number {
+  if (typeof err === "object" && err !== null && "statusCode" in err) {
+    const codigo = (err as { statusCode: unknown }).statusCode;
+    if (typeof codigo === "number") return codigo;
+  }
+  return 0;
+}
+
+// Todo erro vira { sucesso: false, erro: "..." } com o status certo.
+app.setErrorHandler((err: unknown, _requisicao, resposta) => {
+  if (err instanceof ErroHttp) {
+    return resposta
+      .code(err.status)
+      .send({ sucesso: false, erro: err.message });
+  }
+
+  // JSON malformado e outros erros de requisição (4xx) do próprio Fastify
+  const status = statusDoErro(err);
+  if (status >= 400 && status < 500) {
+    return resposta
+      .code(status)
+      .send({ sucesso: false, erro: "Requisição inválida." });
+  }
+
+  app.log.error(err);
+  return resposta
+    .code(500)
+    .send({ sucesso: false, erro: "Erro interno do servidor." });
+});
+
+// Rota que não existe também responde em JSON.
+app.setNotFoundHandler((_requisicao, resposta) => {
+  return resposta
+    .code(404)
+    .send({ sucesso: false, erro: "Rota não encontrada." });
+});
+
+// Rota de teste, só para saber se o servidor está de pé.
+app.get("/api/saude", async () => {
+  return { sucesso: true, dados: { status: "ok" } };
+});
+
+// TEMPORÁRIA: testa a conexão com o banco. Apagamos no final.
+app.get("/api/saude/db", async () => {
+  const linhas = await consultar<RowDataPacket>(
+    "SELECT COUNT(*) AS total FROM produtos",
+  );
+  return {
+    sucesso: true,
+    dados: { produtos: Number(linhas[0]?.["total"] ?? 0) },
+  };
+});
+
+// Permite receber arquivos (upload de foto): 1 arquivo de até 5 MB por requisição.
+await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+
+// --- Rotas da API ---
+await app.register(rotasAuth, { prefix: "/api/auth" });
+await app.register(rotasCategorias, { prefix: "/api/categorias" });
+await app.register(rotasCategoriasPublicas, { prefix: "/api/publico/categorias" });
+await app.register(rotasProdutosPublicos, { prefix: "/api/publico/produtos" });
+await app.register(rotasProdutos, { prefix: "/api/produtos" });
+await app.register(rotasContatoPublico, { prefix: "/api/publico/contato" });
+await app.register(rotasContatos, { prefix: "/api/contatos" });
+await app.register(rotasDashboard, { prefix: "/api/dashboard" });
+
+await app.listen({ port: config.porta, host: "0.0.0.0" });
