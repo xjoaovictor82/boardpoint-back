@@ -1,6 +1,7 @@
 import mysql from "mysql2/promise";
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { config } from "./config.js";
+
 
 /** Conexões reutilizáveis com o MariaDB (equivale ao getConexao() do PHP). */
 export const pool = mysql.createPool({
@@ -49,4 +50,25 @@ export async function chamarProcedimento<T extends RowDataPacket>(
 ): Promise<T[]> {
   const [resultado] = await pool.query<RowDataPacket[][]>(sql, parametros);
   return (resultado[0] ?? []) as T[];
+}
+
+/**
+ * Roda várias gravações como "tudo ou nada": se qualquer uma falhar, nenhuma vale.
+ * Use a `conexao` recebida (e não o `executar`) dentro do trabalho.
+ */
+export async function emTransacao<T>(
+  trabalho: (conexao: PoolConnection) => Promise<T>,
+): Promise<T> {
+  const conexao = await pool.getConnection();
+  try {
+    await conexao.beginTransaction();
+    const resultado = await trabalho(conexao);
+    await conexao.commit();
+    return resultado;
+  } catch (err) {
+    await conexao.rollback();
+    throw err;
+  } finally {
+    conexao.release();
+  }
 }
