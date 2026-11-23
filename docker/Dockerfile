@@ -1,15 +1,22 @@
-# Backend PHP do Board Point (Apache + PHP 8.2)
-FROM php:8.2-apache
+FROM node:22-alpine
 
-# Extensão usada pelo config.php (PDO + MySQL/MariaDB)
-RUN docker-php-ext-install pdo_mysql
+WORKDIR /app
 
-# Uploads de fotos até 10 MB (o padrão do PHP é 2 MB)
-COPY uploads.ini /usr/local/etc/php/conf.d/uploads.ini
+COPY package.json package-lock.json ./
 
-# Pasta das fotos enviadas pelo admin, com dono www-data (usuário do Apache).
-# Quando o volume "uploads" é criado, ele herda esta permissão.
-RUN mkdir -p /var/www/html/produtos/uploads \
-    && chown -R www-data:www-data /var/www/html/produtos
+RUN npm ci
 
-EXPOSE 80
+COPY tsconfig.json ./
+COPY src ./src
+
+RUN npm run build
+
+ENV NODE_ENV=production
+ENV PORTA=3000
+ENV PASTA_UPLOADS=/app/uploads
+
+RUN mkdir -p /app/uploads
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
